@@ -122,6 +122,10 @@ export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 ```
 永久生效就添加到 ~/.bashrc 里面然后 source ~/.bashrc 一下  
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Holasyb918/HeyGem-Linux-Python-Hack&type=Date)](https://www.star-history.com/#Holasyb918/HeyGem-Linux-Python-Hack&Date)
+
 ## Contributing  
 欢迎贡献！
 
