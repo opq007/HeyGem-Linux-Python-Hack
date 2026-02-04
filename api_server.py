@@ -105,21 +105,29 @@ if not AUTH_TOKEN:
     logger.warning("环境变量 DIGITAL_HUMAN_AUTH_TOKEN 未设置，将允许所有请求！")
     logger.warning("请设置 DIGITAL_HUMAN_AUTH_TOKEN 环境变量以启用鉴权")
 
-# FastAPI 应用
+# FastAPI 主应用（根路径）
 app = FastAPI(
     title="HeyGem 数字人 API",
     description="提供数字人视频生成服务",
     version="1.0.0"
 )
 
-# CORS 中间件
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# FastAPI 子应用（挂载到 /heygem）
+heygem_app = FastAPI(
+    title="HeyGem 数字人 API",
+    description="提供数字人视频生成服务",
+    version="1.0.0"
 )
+
+# CORS 中间件（应用到两个应用）
+for fastapi_app in [app, heygem_app]:
+    fastapi_app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # Token 鉴权
 security = HTTPBearer(auto_error=False)
@@ -426,7 +434,7 @@ service.trans_dh_service.write_video = write_video_async
 # 启动时初始化
 # =============================================================================
 
-@app.on_event("startup")
+@heygem_app.on_event("startup")
 async def startup_event():
     """应用启动时初始化服务"""
     try:
@@ -438,7 +446,7 @@ async def startup_event():
 # API 接口
 # =============================================================================
 
-@app.get("/", response_model=HealthResponse)
+@heygem_app.get("/", response_model=HealthResponse)
 async def root():
     """根路径 - 健康检查"""
     return HealthResponse(
@@ -448,7 +456,7 @@ async def root():
         initialized=service_initialized
     )
 
-@app.get("/health", response_model=HealthResponse)
+@heygem_app.get("/health", response_model=HealthResponse)
 async def health_check():
     """健康检查接口"""
     return HealthResponse(
@@ -458,7 +466,7 @@ async def health_check():
         initialized=service_initialized
     )
 
-@app.get("/api/v1/gpu/info")
+@heygem_app.get("/api/v1/gpu/info")
 async def get_gpu_info(auth_verified: bool = Depends(verify_token)):
     """
     获取 GPU 信息
@@ -509,7 +517,7 @@ async def get_gpu_info(auth_verified: bool = Depends(verify_token)):
     
     return gpu_info
 
-@app.post("/api/v1/digital-human/generate", response_model=DigitalHumanResponse)
+@heygem_app.post("/api/v1/digital-human/generate", response_model=DigitalHumanResponse)
 async def generate_digital_human(
     request: DigitalHumanRequest,
     auth_verified: bool = Depends(verify_token)
@@ -676,7 +684,7 @@ async def generate_digital_human(
             error=str(e)
         )
 
-@app.post("/api/v1/digital-human/upload")
+@heygem_app.post("/api/v1/digital-human/upload")
 async def upload_files(
     files: List[UploadFile] = File(..., description="上传的文件列表（音频和/或视频）"),
     auth_verified: bool = Depends(verify_token)
@@ -765,7 +773,7 @@ async def upload_files(
             detail=f"文件上传失败: {str(e)}"
         )
 
-@app.get("/api/v1/files/{filename}")
+@heygem_app.get("/api/v1/files/{filename}")
 async def get_file(
     filename: str,
     auth_verified: bool = Depends(verify_token)
@@ -830,7 +838,7 @@ async def get_file(
         filename=original_filename
     )
 
-@app.get("/api/v1/tasks/{task_id}/result")
+@heygem_app.get("/api/v1/tasks/{task_id}/result")
 async def get_task_result(
     task_id: str,
     auth_verified: bool = Depends(verify_token)
@@ -875,7 +883,7 @@ async def get_task_result(
         filename=f"digital_human_{task_id}.mp4"
     )
 
-@app.get("/api/v1/tasks/{task_id}")
+@heygem_app.get("/api/v1/tasks/{task_id}")
 async def get_task_status(
     task_id: str,
     auth_verified: bool = Depends(verify_token)
@@ -911,6 +919,22 @@ async def get_task_status(
     }
 
 # =============================================================================
+# 挂载子应用到 /heygem 路径
+# =============================================================================
+
+app.mount("/heygem", heygem_app)
+
+@app.get("/", response_model=HealthResponse)
+async def app_root():
+    """主应用根路径 - 重定向到健康检查"""
+    return HealthResponse(
+        status="ok",
+        service="HeyGem Digital Human API",
+        version="1.0.0",
+        initialized=service_initialized
+    )
+
+# =============================================================================
 # 主程序入口
 # =============================================================================
 
@@ -937,13 +961,18 @@ if __name__ == "__main__":
     
     logger.info("=" * 60)
     logger.info("API 接口:")
-    logger.info("  GET  /health                           - 健康检查")
-    logger.info("  GET  /api/v1/gpu/info                  - 查看 GPU 信息")
-    logger.info("  POST /api/v1/digital-human/generate    - 生成数字人视频 (URL 方式)")
-    logger.info("  POST /api/v1/digital-human/upload      - 上传文件（音频/视频）")
-    logger.info("  GET  /api/v1/files/{filename}          - 下载上传的文件")
-    logger.info("  GET  /api/v1/tasks/{task_id}           - 查询任务状态")
-    logger.info("  GET  /api/v1/tasks/{task_id}/result    - 下载结果视频")
+    logger.info("  GET  /                               - 主应用健康检查")
+    logger.info("  GET  /heygem/                        - 子应用健康检查")
+    logger.info("  GET  /heygem/health                  - 健康检查")
+    logger.info("  GET  /heygem/docs                    - API 文档 (Swagger)")
+    logger.info("  GET  /heygem/redoc                   - API 文档 (ReDoc)")
+    logger.info("  GET  /heygem/openapi.json            - OpenAPI 规范")
+    logger.info("  GET  /heygem/api/v1/gpu/info         - 查看 GPU 信息")
+    logger.info("  POST /heygem/api/v1/digital-human/generate - 生成数字人视频 (URL 方式)")
+    logger.info("  POST /heygem/api/v1/digital-human/upload   - 上传文件（音频/视频）")
+    logger.info("  GET  /heygem/api/v1/files/{filename}       - 下载上传的文件")
+    logger.info("  GET  /heygem/api/v1/tasks/{task_id}        - 查询任务状态")
+    logger.info("  GET  /heygem/api/v1/tasks/{task_id}/result - 下载结果视频")
     logger.info("=" * 60)
     
     uvicorn.run(
