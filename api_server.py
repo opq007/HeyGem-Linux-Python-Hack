@@ -569,9 +569,6 @@ async def generate_digital_human(
         # 获取视频信息
         width, height, fps = get_video_info(video_path)
         
-        # 创建结果队列
-        result_queue = []
-        
         # 调用数字人服务
         digital_human_service.task_dic[task_id] = ""
         digital_human_service.work(
@@ -591,6 +588,26 @@ async def generate_digital_human(
         while True:
             if task_id in digital_human_service.task_dic:
                 task_info = digital_human_service.task_dic[task_id]
+                
+                # 检查任务是否失败（task_info 为 False 或包含错误信息）
+                if task_info is False:
+                    logger.error(f"任务 {task_id} 处理失败（False 状态）")
+                    raise HTTPException(
+                        status_code=500,
+                        detail="数字人视频生成失败：后台处理异常"
+                    )
+                
+                if task_info and len(task_info) >= 1:
+                    # 检查是否有错误信息（task_info[0] 可能是错误标识）
+                    if len(task_info) >= 2 and task_info[1] and isinstance(task_info[1], str) and task_info[1].startswith("[Error"):
+                        error_msg = task_info[1]
+                        logger.error(f"任务 {task_id} 处理失败: {error_msg}")
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"数字人视频生成失败: {error_msg}"
+                        )
+                
+                # 检查是否有结果路径
                 if task_info and len(task_info) >= 3:
                     result_path = task_info[2]
                     if result_path and os.path.exists(result_path):
@@ -659,156 +676,159 @@ async def generate_digital_human(
             error=str(e)
         )
 
-@app.post("/api/v1/digital-human/upload", response_model=DigitalHumanResponse)
-async def generate_digital_human_upload(
-    audio_file: UploadFile = File(..., description="音频文件"),
-    video_file: UploadFile = File(..., description="视频文件"),
-    watermark: bool = Form(False, description="是否添加水印"),
-    digital_auth: bool = Form(False, description="是否添加数字人标识"),
+@app.post("/api/v1/digital-human/upload")
+async def upload_files(
+    files: List[UploadFile] = File(..., description="上传的文件列表（音频和/或视频）"),
     auth_verified: bool = Depends(verify_token)
 ):
     """
-    生成数字人视频（使用文件上传）
+    上传文件（音频和/或视频）
     
     参数:
-    - audio_file: 音频文件（UploadFile）
-    - video_file: 视频文件（UploadFile）
-    - watermark: 是否添加水印（默认 False）
-    - digital_auth: 是否添加数字人标识（默认 False）
+    - files: 文件列表，支持上传音频和视频文件
+      - 支持的音频格式: .wav, .mp3, .m4a, .aac
+      - 支持的视频格式: .mp4, .avi, .mov, .mkv
     
     返回:
-    - task_id: 任务 ID
-    - status: 任务状态
-    - message: 消息
-    - result_video_url: 结果视频 URL（任务完成后）
-    - error: 错误信息（如果失败）
+    - 上传成功的文件信息列表，包含:
+      - filename: 文件名
+      - file_type: 文件类型（audio/video）
+      - size: 文件大小（字节）
+      - path: 保存路径
+      - url: 访问 URL
     """
-    # 检查服务是否初始化
-    if not service_initialized:
-        raise HTTPException(
-            status_code=503,
-            detail="服务尚未初始化完成，请稍后再试"
-        )
+    # 定义支持的文件类型
+    audio_extensions = {'.wav', '.mp3', '.m4a', '.aac', '.flac', '.ogg'}
+    video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv'}
     
-    # 生成任务 ID
-    task_id = str(uuid.uuid4())
+    # 确保 output 目录存在
+    output_dir = os.path.join(os.getcwd(), "output")
+    os.makedirs(output_dir, exist_ok=True)
     
-    # 创建临时目录
-    temp_dir = os.path.join(GlobalConfig.instance().temp_dir, task_id)
-    os.makedirs(temp_dir, exist_ok=True)
+    uploaded_files = []
     
     try:
-        # 保存上传的文件
-        audio_path = os.path.join(temp_dir, "audio.wav")
-        video_path = os.path.join(temp_dir, "video.mp4")
-        
-        # 保存音频文件
-        with open(audio_path, "wb") as f:
-            shutil.copyfileobj(audio_file.file, f)
-        
-        # 保存视频文件
-        with open(video_path, "wb") as f:
-            shutil.copyfileobj(video_file.file, f)
-        
-        logger.info(f"文件上传成功: audio={audio_path}, video={video_path}")
-        
-        # 更新任务状态
-        tasks[task_id] = {
-            "status": TaskStatus.PROCESSING,
-            "message": "正在处理数字人视频生成",
-            "result_path": None,
-            "error": None
-        }
-        
-        # 获取视频信息
-        width, height, fps = get_video_info(video_path)
-        
-        # 调用数字人服务
-        digital_human_service.task_dic[task_id] = ""
-        digital_human_service.work(
-            audio_path,
-            video_path,
-            task_id,
-            1 if watermark else 0,  # watermark_switch
-            1 if digital_auth else 0,  # digital_auth
-            0,  # 其他参数
-            0
-        )
-        
-        # 等待结果
-        max_wait_time = 600  # 最长等待 10 分钟
-        start_time = time.time()
-        
-        while True:
-            if task_id in digital_human_service.task_dic:
-                task_info = digital_human_service.task_dic[task_id]
-                if task_info and len(task_info) >= 3:
-                    result_path = task_info[2]
-                    if result_path and os.path.exists(result_path):
-                        # 移动结果文件到结果目录
-                        final_result_dir = os.path.join("result", task_id)
-                        os.makedirs(final_result_dir, exist_ok=True)
-                        
-                        final_result_path = os.path.join(
-                            final_result_dir,
-                            os.path.basename(result_path)
-                        )
-                        shutil.move(result_path, final_result_path)
-                        
-                        # 生成可访问的 URL
-                        result_url = f"/api/v1/tasks/{task_id}/result"
-                        
-                        # 更新任务状态
-                        tasks[task_id] = {
-                            "status": TaskStatus.COMPLETED,
-                            "message": "数字人视频生成完成",
-                            "result_path": final_result_path,
-                            "error": None
-                        }
-                        
-                        # 清理临时文件
-                        shutil.rmtree(temp_dir, ignore_errors=True)
-                        
-                        return DigitalHumanResponse(
-                            task_id=task_id,
-                            status=TaskStatus.COMPLETED,
-                            message="数字人视频生成完成",
-                            result_video_url=result_url
-                        )
+        for file in files:
+            # 获取文件扩展名
+            file_ext = os.path.splitext(file.filename)[1].lower()
             
-            # 检查超时
-            if time.time() - start_time > max_wait_time:
+            # 判断文件类型
+            if file_ext in audio_extensions:
+                file_type = "audio"
+            elif file_ext in video_extensions:
+                file_type = "video"
+            else:
                 raise HTTPException(
-                    status_code=408,
-                    detail="任务处理超时"
+                    status_code=400,
+                    detail=f"不支持的文件类型: {file.filename}。支持的格式: 音频 {audio_extensions}, 视频 {video_extensions}"
                 )
             
-            # 短暂等待
-            time.sleep(1)
+            # 生成唯一文件名（避免覆盖）
+            timestamp = int(time.time())
+            unique_filename = f"{timestamp}_{file.filename}"
+            save_path = os.path.join(output_dir, unique_filename)
             
+            # 保存文件
+            with open(save_path, "wb") as f:
+                shutil.copyfileobj(file.file, f)
+            
+            # 获取文件大小
+            file_size = os.path.getsize(save_path)
+            
+            # 生成访问 URL
+            file_url = f"/api/v1/files/{unique_filename}"
+            
+            uploaded_files.append({
+                "filename": file.filename,
+                "saved_as": unique_filename,
+                "file_type": file_type,
+                "size": file_size,
+                "path": save_path,
+                "url": file_url
+            })
+            
+            logger.info(f"文件上传成功: {file.filename} -> {save_path} ({file_size} bytes)")
+        
+        return {
+            "success": True,
+            "message": f"成功上传 {len(uploaded_files)} 个文件",
+            "files": uploaded_files
+        }
+        
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"数字人生成失败: {str(e)}")
+        logger.error(f"文件上传失败: {str(e)}")
         logger.error(traceback.format_exc())
-        
-        # 更新任务状态
-        tasks[task_id] = {
-            "status": TaskStatus.FAILED,
-            "message": "数字人视频生成失败",
-            "result_path": None,
-            "error": str(e)
-        }
-        
-        # 清理临时文件
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        
-        return DigitalHumanResponse(
-            task_id=task_id,
-            status=TaskStatus.FAILED,
-            message="数字人视频生成失败",
-            error=str(e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"文件上传失败: {str(e)}"
         )
+
+@app.get("/api/v1/files/{filename}")
+async def get_file(
+    filename: str,
+    auth_verified: bool = Depends(verify_token)
+):
+    """
+    获取上传的文件
+    
+    参数:
+    - filename: 文件名（包含时间戳前缀）
+    
+    返回:
+    - 文件内容
+    """
+    # 安全检查：防止路径遍历攻击
+    if ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(
+            status_code=400,
+            detail="无效的文件名"
+        )
+    
+    file_path = os.path.join(os.getcwd(), "output", filename)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(
+            status_code=404,
+            detail="文件不存在"
+        )
+    
+    if not os.path.isfile(file_path):
+        raise HTTPException(
+            status_code=400,
+            detail="不是有效的文件"
+        )
+    
+    # 根据文件扩展名确定媒体类型
+    file_ext = os.path.splitext(filename)[1].lower()
+    media_type = "application/octet-stream"
+    
+    if file_ext in {'.wav'}:
+        media_type = "audio/wav"
+    elif file_ext in {'.mp3'}:
+        media_type = "audio/mpeg"
+    elif file_ext in {'.m4a'}:
+        media_type = "audio/mp4"
+    elif file_ext in {'.aac'}:
+        media_type = "audio/aac"
+    elif file_ext in {'.mp4'}:
+        media_type = "video/mp4"
+    elif file_ext in {'.avi'}:
+        media_type = "video/x-msvideo"
+    elif file_ext in {'.mov'}:
+        media_type = "video/quicktime"
+    elif file_ext in {'.mkv'}:
+        media_type = "video/x-matroska"
+    
+    # 提取原始文件名（去掉时间戳前缀）
+    original_filename = filename.split('_', 1)[1] if '_' in filename else filename
+    
+    return FileResponse(
+        path=file_path,
+        media_type=media_type,
+        filename=original_filename
+    )
 
 @app.get("/api/v1/tasks/{task_id}/result")
 async def get_task_result(
@@ -920,7 +940,8 @@ if __name__ == "__main__":
     logger.info("  GET  /health                           - 健康检查")
     logger.info("  GET  /api/v1/gpu/info                  - 查看 GPU 信息")
     logger.info("  POST /api/v1/digital-human/generate    - 生成数字人视频 (URL 方式)")
-    logger.info("  POST /api/v1/digital-human/upload      - 生成数字人视频 (文件上传)")
+    logger.info("  POST /api/v1/digital-human/upload      - 上传文件（音频/视频）")
+    logger.info("  GET  /api/v1/files/{filename}          - 下载上传的文件")
     logger.info("  GET  /api/v1/tasks/{task_id}           - 查询任务状态")
     logger.info("  GET  /api/v1/tasks/{task_id}/result    - 下载结果视频")
     logger.info("=" * 60)
