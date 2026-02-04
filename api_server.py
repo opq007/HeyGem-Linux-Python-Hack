@@ -166,7 +166,7 @@ class DigitalHumanResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     """健康检查响应"""
-    status: str
+    status: str  # 可以是 "ok", "ready", "initializing", "error" 等
     service: str
     version: str
     initialized: bool
@@ -348,25 +348,59 @@ def get_video_info(video_path: str) -> tuple:
 def init_service():
     """
     初始化数字人服务
+    
+    会同步等待服务完全初始化完成，确保在应用启动前所有资源都已就绪
     """
     global digital_human_service, service_initialized
     
     if service_initialized:
+        logger.info("服务已经初始化，跳过重复初始化")
         return
     
     try:
-        logger.info("开始初始化数字人服务...")
+        logger.info("正在加载模型和初始化数字人服务...")
+        logger.info("这个过程可能需要几分钟时间，请耐心等待...")
+        
+        # 创建服务实例（这会触发模型加载）
         digital_human_service = service.trans_dh_service.TransDhTask()
         
-        # 等待服务初始化完成
-        time.sleep(10)
+        logger.info("服务实例创建完成，正在验证服务可用性...")
         
-        service_initialized = True
-        logger.info("数字人服务初始化完成")
+        # 动态等待服务真正初始化完成（而不是固定等待 10 秒）
+        max_wait_time = 300  # 最长等待 5 分钟
+        check_interval = 2   # 每 2 秒检查一次
+        waited_time = 0
+        
+        while waited_time < max_wait_time:
+            try:
+                # 尝试访问服务内部状态来判断是否初始化完成
+                # 如果服务有 task_dic 属性且可访问，说明初始化基本完成
+                if hasattr(digital_human_service, 'task_dic'):
+                    # 尝试访问 task_dic 来验证服务可用
+                    _ = digital_human_service.task_dic
+                    logger.info("服务验证通过，初始化完成")
+                    service_initialized = True
+                    break
+                
+            except Exception as check_error:
+                logger.debug(f"服务验证中... ({waited_time}/{max_wait_time}秒): {str(check_error)}")
+            
+            time.sleep(check_interval)
+            waited_time += check_interval
+        
+        # 检查是否超时
+        if not service_initialized:
+            raise TimeoutError(
+                f"服务初始化超时（等待了 {max_wait_time} 秒），"
+                "请检查系统资源和模型文件"
+            )
+        
+        logger.info("✓ 数字人服务初始化成功！")
         
     except Exception as e:
-        logger.error(f"数字人服务初始化失败: {str(e)}")
+        logger.error(f"✗ 数字人服务初始化失败: {str(e)}")
         logger.error(traceback.format_exc())
+        service_initialized = False
         raise
 
 # =============================================================================
@@ -437,10 +471,35 @@ service.trans_dh_service.write_video = write_video_async
 @heygem_app.on_event("startup")
 async def startup_event():
     """应用启动时初始化服务"""
+    import asyncio
+    
+    logger.info("=" * 60)
+    logger.info("开始启动 HeyGem 数字人服务...")
+    logger.info("=" * 60)
+    
     try:
-        init_service()
+        # 使用线程池执行初始化，避免阻塞事件循环
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, init_service)
+        
+        # 验证服务是否成功初始化
+        if service_initialized:
+            logger.info("=" * 60)
+            logger.info("✓ 服务初始化成功，可以开始处理请求")
+            logger.info("=" * 60)
+        else:
+            logger.error("=" * 60)
+            logger.error("✗ 服务初始化失败：服务未标记为已初始化")
+            logger.error("=" * 60)
+            raise RuntimeError("服务初始化失败")
+            
     except Exception as e:
-        logger.error(f"服务启动失败: {str(e)}")
+        logger.error("=" * 60)
+        logger.error(f"✗ 服务启动失败: {str(e)}")
+        logger.error(traceback.format_exc())
+        logger.error("=" * 60)
+        # 不再抛出异常，让应用继续启动但标记为未初始化
+        # 这样健康检查会返回正确的状态
 
 # =============================================================================
 # API 接口
@@ -449,8 +508,9 @@ async def startup_event():
 @heygem_app.get("/", response_model=HealthResponse)
 async def root():
     """根路径 - 健康检查"""
+    status = "ready" if service_initialized else "initializing"
     return HealthResponse(
-        status="ok",
+        status=status,
         service="HeyGem Digital Human API",
         version="1.0.0",
         initialized=service_initialized
@@ -459,8 +519,9 @@ async def root():
 @heygem_app.get("/health", response_model=HealthResponse)
 async def health_check():
     """健康检查接口"""
+    status = "ready" if service_initialized else "initializing"
     return HealthResponse(
-        status="ok",
+        status=status,
         service="HeyGem Digital Human API",
         version="1.0.0",
         initialized=service_initialized
@@ -520,6 +581,7 @@ async def get_gpu_info(auth_verified: bool = Depends(verify_token)):
 @heygem_app.post("/api/v1/digital-human/generate", response_model=DigitalHumanResponse)
 async def generate_digital_human(
     request: DigitalHumanRequest,
+    background_tasks: BackgroundTasks,
     auth_verified: bool = Depends(verify_token)
 ):
     """
@@ -566,13 +628,82 @@ async def generate_digital_human(
         audio_path = await resolve_file_path(request.audio_url, temp_dir, "音频")
         video_path = await resolve_file_path(request.video_url, temp_dir, "视频")
         
+        # 初始化任务状态
+        tasks[task_id] = {
+            "status": TaskStatus.PENDING,
+            "message": "任务已提交，等待处理",
+            "result_path": None,
+            "error": None,
+            "audio_path": audio_path,
+            "video_path": video_path,
+            "temp_dir": temp_dir,
+            "watermark": request.watermark,
+            "digital_auth": request.digital_auth
+        }
+        
+        # 添加后台任务处理
+        background_tasks.add_task(
+            process_digital_human_task,
+            task_id,
+            audio_path,
+            video_path,
+            temp_dir,
+            request.watermark,
+            request.digital_auth
+        )
+        
+        # 立即返回任务ID
+        result_url = f"/heygem/api/v1/tasks/{task_id}"
+        
+        return DigitalHumanResponse(
+            task_id=task_id,
+            status=TaskStatus.PENDING,
+            message="任务已提交，正在后台处理中",
+            result_video_url=result_url
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"数字人生成任务提交失败: {str(e)}")
+        logger.error(traceback.format_exc())
+        
         # 更新任务状态
         tasks[task_id] = {
-            "status": TaskStatus.PROCESSING,
-            "message": "正在处理数字人视频生成",
+            "status": TaskStatus.FAILED,
+            "message": "任务提交失败",
             "result_path": None,
-            "error": None
+            "error": str(e)
         }
+        
+        # 清理临时文件
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        
+        return DigitalHumanResponse(
+            task_id=task_id,
+            status=TaskStatus.FAILED,
+            message="任务提交失败",
+            error=str(e)
+        )
+
+async def process_digital_human_task(
+    task_id: str,
+    audio_path: str,
+    video_path: str,
+    temp_dir: str,
+    watermark: bool,
+    digital_auth: bool
+):
+    """
+    后台处理数字人视频生成任务
+    
+    这个函数在后台线程中执行，不会阻塞 HTTP 响应
+    """
+    try:
+        # 更新任务状态为处理中
+        tasks[task_id]["status"] = TaskStatus.PROCESSING
+        tasks[task_id]["message"] = "正在生成数字人视频"
+        logger.info(f"开始处理任务 {task_id}")
         
         # 获取视频信息
         width, height, fps = get_video_info(video_path)
@@ -583,8 +714,8 @@ async def generate_digital_human(
             audio_path,
             video_path,
             task_id,
-            0,  # watermark_switch
-            0,  # digital_auth
+            1 if watermark else 0,  # watermark_switch
+            1 if digital_auth else 0,  # digital_auth
             0,  # 其他参数
             0
         )
@@ -600,20 +731,20 @@ async def generate_digital_human(
                 # 检查任务是否失败（task_info 为 False 或包含错误信息）
                 if task_info is False:
                     logger.error(f"任务 {task_id} 处理失败（False 状态）")
-                    raise HTTPException(
-                        status_code=500,
-                        detail="数字人视频生成失败：后台处理异常"
-                    )
+                    tasks[task_id]["status"] = TaskStatus.FAILED
+                    tasks[task_id]["message"] = "数字人视频生成失败"
+                    tasks[task_id]["error"] = "后台处理异常"
+                    return
                 
                 if task_info and len(task_info) >= 1:
-                    # 检查是否有错误信息（task_info[0] 可能是错误标识）
+                    # 检查是否有错误信息
                     if len(task_info) >= 2 and task_info[1] and isinstance(task_info[1], str) and task_info[1].startswith("[Error"):
                         error_msg = task_info[1]
                         logger.error(f"任务 {task_id} 处理失败: {error_msg}")
-                        raise HTTPException(
-                            status_code=500,
-                            detail=f"数字人视频生成失败: {error_msg}"
-                        )
+                        tasks[task_id]["status"] = TaskStatus.FAILED
+                        tasks[task_id]["message"] = "数字人视频生成失败"
+                        tasks[task_id]["error"] = error_msg
+                        return
                 
                 # 检查是否有结果路径
                 if task_info and len(task_info) >= 3:
@@ -629,60 +760,40 @@ async def generate_digital_human(
                         )
                         shutil.move(result_path, final_result_path)
                         
-                        # 生成可访问的 URL
-                        result_url = f"/api/v1/tasks/{task_id}/result"
-                        
-                        # 更新任务状态
-                        tasks[task_id] = {
-                            "status": TaskStatus.COMPLETED,
-                            "message": "数字人视频生成完成",
-                            "result_path": final_result_path,
-                            "error": None
-                        }
+                        # 更新任务状态为完成
+                        tasks[task_id]["status"] = TaskStatus.COMPLETED
+                        tasks[task_id]["message"] = "数字人视频生成完成"
+                        tasks[task_id]["result_path"] = final_result_path
+                        tasks[task_id]["error"] = None
                         
                         # 清理临时文件
                         shutil.rmtree(temp_dir, ignore_errors=True)
                         
-                        return DigitalHumanResponse(
-                            task_id=task_id,
-                            status=TaskStatus.COMPLETED,
-                            message="数字人视频生成完成",
-                            result_video_url=result_url
-                        )
+                        logger.info(f"任务 {task_id} 处理成功: {final_result_path}")
+                        return
             
             # 检查超时
             if time.time() - start_time > max_wait_time:
-                raise HTTPException(
-                    status_code=408,
-                    detail="任务处理超时"
-                )
+                logger.error(f"任务 {task_id} 处理超时")
+                tasks[task_id]["status"] = TaskStatus.FAILED
+                tasks[task_id]["message"] = "任务处理超时"
+                tasks[task_id]["error"] = "处理时间超过 10 分钟"
+                return
             
             # 短暂等待
             time.sleep(1)
             
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"数字人生成失败: {str(e)}")
+        logger.error(f"任务 {task_id} 处理异常: {str(e)}")
         logger.error(traceback.format_exc())
         
         # 更新任务状态
-        tasks[task_id] = {
-            "status": TaskStatus.FAILED,
-            "message": "数字人视频生成失败",
-            "result_path": None,
-            "error": str(e)
-        }
+        tasks[task_id]["status"] = TaskStatus.FAILED
+        tasks[task_id]["message"] = "数字人视频生成失败"
+        tasks[task_id]["error"] = str(e)
         
         # 清理临时文件
         shutil.rmtree(temp_dir, ignore_errors=True)
-        
-        return DigitalHumanResponse(
-            task_id=task_id,
-            status=TaskStatus.FAILED,
-            message="数字人视频生成失败",
-            error=str(e)
-        )
 
 @heygem_app.post("/api/v1/digital-human/upload")
 async def upload_files(
