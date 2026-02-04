@@ -1,0 +1,16 @@
+# FastAPI API 服务额外依赖
+# 在安装原有 requirements.txt 的基础上，安装以下依赖
+
+# FastAPI 核心依赖
+fastapi>=0.95.0
+uvicorn[standard]>=0.22.0
+python-multipart>=0.0.6
+
+# HTTP 客户端（用于下载 URL 文件）
+httpx>=0.24.0
+
+# Pydantic（数据验证）
+pydantic>=1.10.0
+
+# 其他工具
+aiofiles>=23.0.0
