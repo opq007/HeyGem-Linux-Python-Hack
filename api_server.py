@@ -106,6 +106,116 @@ if not AUTH_TOKEN:
     logger.warning("环境变量 DIGITAL_HUMAN_AUTH_TOKEN 未设置，将允许所有请求！")
     logger.warning("请设置 DIGITAL_HUMAN_AUTH_TOKEN 环境变量以启用鉴权")
 
+# =============================================================================
+# 生命周期管理和服务初始化函数
+# =============================================================================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    应用生命周期管理
+    
+    使用新的 lifespan 事件处理器替代弃用的 on_event
+    """
+    import asyncio
+    
+    # 启动时执行
+    logger.info("=" * 60)
+    logger.info("开始启动 HeyGem 数字人服务...")
+    logger.info("=" * 60)
+    
+    try:
+        # 使用线程池执行初始化，避免阻塞事件循环
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, init_service)
+        
+        # 验证服务是否成功初始化
+        if service_initialized:
+            logger.info("=" * 60)
+            logger.info("✓ 服务初始化成功，可以开始处理请求")
+            logger.info("=" * 60)
+        else:
+            logger.error("=" * 60)
+            logger.error("✗ 服务初始化失败：服务未标记为已初始化")
+            logger.error("=" * 60)
+            # 不再抛出异常，让应用继续启动但标记为未初始化
+            
+    except Exception as e:
+        logger.error("=" * 60)
+        logger.error(f"✗ 服务启动失败: {str(e)}")
+        logger.error(traceback.format_exc())
+        logger.error("=" * 60)
+        # 不再抛出异常，让应用继续启动但标记为未初始化
+        # 这样健康检查会返回正确的状态
+    
+    # 生成
+    yield
+    
+    # 关闭时执行
+    logger.info("HeyGem 数字人服务正在关闭...")
+
+def init_service():
+    """
+    初始化数字人服务
+    
+    会同步等待服务完全初始化完成，确保在应用启动前所有资源都已就绪
+    """
+    global digital_human_service, service_initialized
+    
+    if service_initialized:
+        logger.info("服务已经初始化，跳过重复初始化")
+        return
+    
+    try:
+        logger.info("正在加载模型和初始化数字人服务...")
+        logger.info("这个过程可能需要几分钟时间，请耐心等待...")
+        
+        # 创建服务实例（这会触发模型加载）
+        digital_human_service = service.trans_dh_service.TransDhTask()
+        
+        logger.info("服务实例创建完成，正在验证服务可用性...")
+        
+        # 动态等待服务真正初始化完成（而不是固定等待 10 秒）
+        max_wait_time = 300  # 最长等待 5 分钟
+        check_interval = 2   # 每 2 秒检查一次
+        waited_time = 0
+        
+        while waited_time < max_wait_time:
+            try:
+                # 尝试访问服务内部状态来判断是否初始化完成
+                # 如果服务有 task_dic 属性且可访问，说明初始化基本完成
+                if hasattr(digital_human_service, 'task_dic'):
+                    # 尝试访问 task_dic 来验证服务可用
+                    _ = digital_human_service.task_dic
+                    logger.info("服务验证通过，初始化完成")
+                    service_initialized = True
+                    break
+                
+            except Exception as check_error:
+                logger.debug(f"服务验证中... ({waited_time}/{max_wait_time}秒): {str(check_error)}")
+            
+            time.sleep(check_interval)
+            waited_time += check_interval
+        
+        # 检查是否超时
+        if not service_initialized:
+            raise TimeoutError(
+                f"服务初始化超时（等待了 {max_wait_time} 秒），"
+                "请检查系统资源和模型文件"
+            )
+        
+        logger.info("✓ 数字人服务初始化成功！")
+        
+    except Exception as e:
+        logger.error(f"✗ 数字人服务初始化失败: {str(e)}")
+        logger.error(traceback.format_exc())
+        service_initialized = False
+        raise
+
+# =============================================================================
+# FastAPI 应用配置
+# =============================================================================
+
 # FastAPI 主应用（根路径）
 app = FastAPI(
     title="HeyGem 数字人 API",
@@ -346,108 +456,6 @@ def get_video_info(video_path: str) -> tuple:
     fps = cap.get(cv2.CAP_PROP_FPS)
     cap.release()
     return width, height, fps
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    应用生命周期管理
-    
-    使用新的 lifespan 事件处理器替代弃用的 on_event
-    """
-    import asyncio
-    
-    # 启动时执行
-    logger.info("=" * 60)
-    logger.info("开始启动 HeyGem 数字人服务...")
-    logger.info("=" * 60)
-    
-    try:
-        # 使用线程池执行初始化，避免阻塞事件循环
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, init_service)
-        
-        # 验证服务是否成功初始化
-        if service_initialized:
-            logger.info("=" * 60)
-            logger.info("✓ 服务初始化成功，可以开始处理请求")
-            logger.info("=" * 60)
-        else:
-            logger.error("=" * 60)
-            logger.error("✗ 服务初始化失败：服务未标记为已初始化")
-            logger.error("=" * 60)
-            # 不再抛出异常，让应用继续启动但标记为未初始化
-            
-    except Exception as e:
-        logger.error("=" * 60)
-        logger.error(f"✗ 服务启动失败: {str(e)}")
-        logger.error(traceback.format_exc())
-        logger.error("=" * 60)
-        # 不再抛出异常，让应用继续启动但标记为未初始化
-        # 这样健康检查会返回正确的状态
-    
-    # 生成
-    yield
-    
-    # 关闭时执行
-    logger.info("HeyGem 数字人服务正在关闭...")
-
-def init_service():
-    """
-    初始化数字人服务
-    
-    会同步等待服务完全初始化完成，确保在应用启动前所有资源都已就绪
-    """
-    global digital_human_service, service_initialized
-    
-    if service_initialized:
-        logger.info("服务已经初始化，跳过重复初始化")
-        return
-    
-    try:
-        logger.info("正在加载模型和初始化数字人服务...")
-        logger.info("这个过程可能需要几分钟时间，请耐心等待...")
-        
-        # 创建服务实例（这会触发模型加载）
-        digital_human_service = service.trans_dh_service.TransDhTask()
-        
-        logger.info("服务实例创建完成，正在验证服务可用性...")
-        
-        # 动态等待服务真正初始化完成（而不是固定等待 10 秒）
-        max_wait_time = 300  # 最长等待 5 分钟
-        check_interval = 2   # 每 2 秒检查一次
-        waited_time = 0
-        
-        while waited_time < max_wait_time:
-            try:
-                # 尝试访问服务内部状态来判断是否初始化完成
-                # 如果服务有 task_dic 属性且可访问，说明初始化基本完成
-                if hasattr(digital_human_service, 'task_dic'):
-                    # 尝试访问 task_dic 来验证服务可用
-                    _ = digital_human_service.task_dic
-                    logger.info("服务验证通过，初始化完成")
-                    service_initialized = True
-                    break
-                
-            except Exception as check_error:
-                logger.debug(f"服务验证中... ({waited_time}/{max_wait_time}秒): {str(check_error)}")
-            
-            time.sleep(check_interval)
-            waited_time += check_interval
-        
-        # 检查是否超时
-        if not service_initialized:
-            raise TimeoutError(
-                f"服务初始化超时（等待了 {max_wait_time} 秒），"
-                "请检查系统资源和模型文件"
-            )
-        
-        logger.info("✓ 数字人服务初始化成功！")
-        
-    except Exception as e:
-        logger.error(f"✗ 数字人服务初始化失败: {str(e)}")
-        logger.error(traceback.format_exc())
-        service_initialized = False
-        raise
 
 # =============================================================================
 # 自定义视频写入函数（用于异步处理）
