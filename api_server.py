@@ -253,18 +253,20 @@ def init_service():
 # =============================================================================
 
 # FastAPI 主应用（根路径）
+# 注意：lifespan 必须挂到主应用上，因为 uvicorn 启动的是主应用
+# 子应用的 lifespan 在 mount 时不会自动触发
 app = FastAPI(
     title="HeyGem 数字人 API",
     description="提供数字人视频生成服务",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # FastAPI 子应用（挂载到 /heygem）
 heygem_app = FastAPI(
     title="HeyGem 数字人 API",
     description="提供数字人视频生成服务",
-    version="1.0.0",
-    lifespan=lifespan
+    version="1.0.0"
 )
 
 # CORS 中间件（应用到两个应用）
