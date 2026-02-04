@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Bac
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from pydantic import BaseModel, HttpUrl, Field
 import httpx
 
@@ -116,7 +117,8 @@ app = FastAPI(
 heygem_app = FastAPI(
     title="HeyGem 数字人 API",
     description="提供数字人视频生成服务",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # CORS 中间件（应用到两个应用）
@@ -345,6 +347,50 @@ def get_video_info(video_path: str) -> tuple:
     cap.release()
     return width, height, fps
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    应用生命周期管理
+    
+    使用新的 lifespan 事件处理器替代弃用的 on_event
+    """
+    import asyncio
+    
+    # 启动时执行
+    logger.info("=" * 60)
+    logger.info("开始启动 HeyGem 数字人服务...")
+    logger.info("=" * 60)
+    
+    try:
+        # 使用线程池执行初始化，避免阻塞事件循环
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, init_service)
+        
+        # 验证服务是否成功初始化
+        if service_initialized:
+            logger.info("=" * 60)
+            logger.info("✓ 服务初始化成功，可以开始处理请求")
+            logger.info("=" * 60)
+        else:
+            logger.error("=" * 60)
+            logger.error("✗ 服务初始化失败：服务未标记为已初始化")
+            logger.error("=" * 60)
+            # 不再抛出异常，让应用继续启动但标记为未初始化
+            
+    except Exception as e:
+        logger.error("=" * 60)
+        logger.error(f"✗ 服务启动失败: {str(e)}")
+        logger.error(traceback.format_exc())
+        logger.error("=" * 60)
+        # 不再抛出异常，让应用继续启动但标记为未初始化
+        # 这样健康检查会返回正确的状态
+    
+    # 生成
+    yield
+    
+    # 关闭时执行
+    logger.info("HeyGem 数字人服务正在关闭...")
+
 def init_service():
     """
     初始化数字人服务
@@ -467,39 +513,6 @@ service.trans_dh_service.write_video = write_video_async
 # =============================================================================
 # 启动时初始化
 # =============================================================================
-
-@heygem_app.on_event("startup")
-async def startup_event():
-    """应用启动时初始化服务"""
-    import asyncio
-    
-    logger.info("=" * 60)
-    logger.info("开始启动 HeyGem 数字人服务...")
-    logger.info("=" * 60)
-    
-    try:
-        # 使用线程池执行初始化，避免阻塞事件循环
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, init_service)
-        
-        # 验证服务是否成功初始化
-        if service_initialized:
-            logger.info("=" * 60)
-            logger.info("✓ 服务初始化成功，可以开始处理请求")
-            logger.info("=" * 60)
-        else:
-            logger.error("=" * 60)
-            logger.error("✗ 服务初始化失败：服务未标记为已初始化")
-            logger.error("=" * 60)
-            raise RuntimeError("服务初始化失败")
-            
-    except Exception as e:
-        logger.error("=" * 60)
-        logger.error(f"✗ 服务启动失败: {str(e)}")
-        logger.error(traceback.format_exc())
-        logger.error("=" * 60)
-        # 不再抛出异常，让应用继续启动但标记为未初始化
-        # 这样健康检查会返回正确的状态
 
 # =============================================================================
 # API 接口
