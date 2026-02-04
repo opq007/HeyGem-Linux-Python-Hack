@@ -120,27 +120,45 @@ async def lifespan(app: FastAPI):
     import asyncio
     
     # 启动时执行
+    print("=" * 60)
+    print("开始启动 HeyGem 数字人服务...")
+    print("=" * 60)
     logger.info("=" * 60)
     logger.info("开始启动 HeyGem 数字人服务...")
     logger.info("=" * 60)
     
     try:
+        print("正在调用 init_service...")
+        logger.info("正在调用 init_service...")
+        
         # 使用线程池执行初始化，避免阻塞事件循环
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, init_service)
         
+        print("init_service 执行完成")
+        logger.info("init_service 执行完成")
+        
         # 验证服务是否成功初始化
         if service_initialized:
+            print("=" * 60)
+            print("✓ 服务初始化成功，可以开始处理请求")
+            print("=" * 60)
             logger.info("=" * 60)
             logger.info("✓ 服务初始化成功，可以开始处理请求")
             logger.info("=" * 60)
         else:
+            print("=" * 60)
+            print("✗ 服务初始化失败：服务未标记为已初始化")
+            print("=" * 60)
             logger.error("=" * 60)
             logger.error("✗ 服务初始化失败：服务未标记为已初始化")
             logger.error("=" * 60)
             # 不再抛出异常，让应用继续启动但标记为未初始化
             
     except Exception as e:
+        print("=" * 60)
+        print(f"✗ 服务启动失败: {str(e)}")
+        print("=" * 60)
         logger.error("=" * 60)
         logger.error(f"✗ 服务启动失败: {str(e)}")
         logger.error(traceback.format_exc())
@@ -149,9 +167,12 @@ async def lifespan(app: FastAPI):
         # 这样健康检查会返回正确的状态
     
     # 生成
+    print("lifespan yield, 应用已启动")
+    logger.info("lifespan yield, 应用已启动")
     yield
     
     # 关闭时执行
+    print("HeyGem 数字人服务正在关闭...")
     logger.info("HeyGem 数字人服务正在关闭...")
 
 def init_service():
@@ -162,16 +183,25 @@ def init_service():
     """
     global digital_human_service, service_initialized
     
+    print(f"init_service 被调用, service_initialized={service_initialized}")
+    logger.info(f"init_service 被调用, service_initialized={service_initialized}")
+    
     if service_initialized:
         logger.info("服务已经初始化，跳过重复初始化")
         return
     
     try:
+        print("正在加载模型和初始化数字人服务...")
         logger.info("正在加载模型和初始化数字人服务...")
+        print("这个过程可能需要几分钟时间，请耐心等待...")
         logger.info("这个过程可能需要几分钟时间，请耐心等待...")
         
         # 创建服务实例（这会触发模型加载）
+        print("正在创建 TransDhTask 实例...")
+        logger.info("正在创建 TransDhTask 实例...")
         digital_human_service = service.trans_dh_service.TransDhTask()
+        print("TransDhTask 实例创建完成")
+        logger.info("TransDhTask 实例创建完成")
         
         logger.info("服务实例创建完成，正在验证服务可用性...")
         
@@ -180,6 +210,9 @@ def init_service():
         check_interval = 2   # 每 2 秒检查一次
         waited_time = 0
         
+        print(f"开始验证服务可用性，最长等待 {max_wait_time} 秒...")
+        logger.info(f"开始验证服务可用性，最长等待 {max_wait_time} 秒...")
+        
         while waited_time < max_wait_time:
             try:
                 # 尝试访问服务内部状态来判断是否初始化完成
@@ -187,11 +220,13 @@ def init_service():
                 if hasattr(digital_human_service, 'task_dic'):
                     # 尝试访问 task_dic 来验证服务可用
                     _ = digital_human_service.task_dic
+                    print(f"服务验证通过，初始化完成 (等待了 {waited_time} 秒)")
                     logger.info("服务验证通过，初始化完成")
                     service_initialized = True
                     break
                 
             except Exception as check_error:
+                print(f"服务验证中... ({waited_time}/{max_wait_time}秒): {str(check_error)}")
                 logger.debug(f"服务验证中... ({waited_time}/{max_wait_time}秒): {str(check_error)}")
             
             time.sleep(check_interval)
@@ -199,14 +234,15 @@ def init_service():
         
         # 检查是否超时
         if not service_initialized:
-            raise TimeoutError(
-                f"服务初始化超时（等待了 {max_wait_time} 秒），"
-                "请检查系统资源和模型文件"
-            )
+            error_msg = f"服务初始化超时（等待了 {max_wait_time} 秒），请检查系统资源和模型文件"
+            print(error_msg)
+            raise TimeoutError(error_msg)
         
+        print("✓ 数字人服务初始化成功！")
         logger.info("✓ 数字人服务初始化成功！")
         
     except Exception as e:
+        print(f"✗ 数字人服务初始化失败: {str(e)}")
         logger.error(f"✗ 数字人服务初始化失败: {str(e)}")
         logger.error(traceback.format_exc())
         service_initialized = False
